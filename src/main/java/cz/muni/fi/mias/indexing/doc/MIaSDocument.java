@@ -6,17 +6,18 @@ package cz.muni.fi.mias.indexing.doc;
 
 import java.io.IOException;
 import java.util.List;
-import org.apache.lucene.document.Document;
+import java.util.Map;
 
 /**
  * Interface for classes that create Lucene documents.
+ *
+ * _UPDATE_ ..creates a mapping for ES's IndexRequest..
  * 
  * @author Martin Liska
  */
 public interface MIaSDocument {
-    
-    public List<Document> getDocuments() throws IOException;
 
-    public String getLogInfo();
-    
+    List<Map<String, Object>> getMappings() throws IOException;
+
+    String getLogInfo();
 }

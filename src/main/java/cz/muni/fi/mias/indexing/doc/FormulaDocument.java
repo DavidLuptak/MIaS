@@ -6,13 +6,12 @@ package cz.muni.fi.mias.indexing.doc;
 
 import cz.muni.fi.mias.MIaSUtils;
 import cz.muni.fi.mias.math.MathTokenizer;
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.util.ArrayList;
-import java.util.List;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+import org.xml.sax.SAXException;
+
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.transform.Result;
@@ -21,30 +20,29 @@ import javax.xml.transform.TransformerException;
 import javax.xml.transform.TransformerFactory;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-import org.apache.lucene.document.Document;
-import org.apache.lucene.document.Field;
-import org.apache.lucene.document.StringField;
-import org.apache.lucene.document.TextField;
-import org.w3c.dom.Node;
-import org.w3c.dom.NodeList;
-import org.xml.sax.SAXException;
+import java.io.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 
 /**
- * Implementation of MIaSDocument that creates one Lucene document for each math formula in the input file.
- * 
+ * Implementation of MIaSDocument that creates one Lucene document
+ * for each math formula in the input file.
+ *
+ * _UPDATE_ ..creates a mapping for ES's IndexRequest..
+ *
  * @author Martin Liska
  */
-public class FormulaDocument extends AbstractMIaSDocument {    
+public class FormulaDocument extends AbstractMIaSDocument {
     private static final Logger LOG = LogManager.getLogger(FormulaDocument.class);
+
     public FormulaDocument(DocumentSource source) {
         super(source);
     }
 
     @Override
-    public List<Document> getDocuments() throws IOException {
-        List<Document> result = new ArrayList<>();
+    public List<Map<String, Object>> getMappings() throws IOException {
+        List<Map<String, Object>> result = new ArrayList<>();
         try {
             DocumentBuilder builder = MIaSUtils.prepareDocumentBuilder();
             org.w3c.dom.Document document = builder.parse(source.resetStream());
@@ -58,13 +56,17 @@ public class FormulaDocument extends AbstractMIaSDocument {
                 } else {
                     id = String.valueOf(i);
                 }
-                Document doc = source.createDocument();
-                id = doc.get("id") + "#" + id;
-                doc.removeField("id");
-                doc.add(new StringField("id", id, Field.Store.YES));
-                doc.removeField("title");
-                doc.add(new TextField("title", id, Field.Store.YES));
-                
+                // Document doc = source.createDocument();
+                Map<String, Object> mapping = source.createMapping();
+                // id = doc.get("id") + "#" + id;
+                // doc.removeField("id");
+                id = mapping.remove("id") + "#" + id;
+                // doc.add(new StringField("id", id, Field.Store.YES));
+                mapping.put("id", id);
+                // doc.removeField("title");
+                // doc.add(new TextField("title", id, Field.Store.YES));
+                mapping.put("title", id);
+
                 ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
                 Source xmlSource = new DOMSource(item);
                 Result outputTarget = new StreamResult(outputStream);
@@ -72,19 +74,20 @@ public class FormulaDocument extends AbstractMIaSDocument {
                 InputStream is = new ByteArrayInputStream(outputStream.toByteArray());
                 InputStreamReader isr = new InputStreamReader(is, "UTF-8");
                 MathTokenizer mathTokenizer = new MathTokenizer(isr, true, MathTokenizer.MathMLType.PRESENTATION);
-                mathTokenizer.setFormulaPosition(i+1);
-                doc.add(new TextField("pmath", mathTokenizer));
+                mathTokenizer.setFormulaPosition(i + 1);
+                // doc.add(new TextField("pmath", mathTokenizer));
+                mapping.put("pmath", mathTokenizer);
                 is.reset();
                 isr = new InputStreamReader(is, "UTF-8");
                 MathTokenizer mathTokenizer1 = new MathTokenizer(isr, true, MathTokenizer.MathMLType.CONTENT);
-                mathTokenizer1.setFormulaPosition(i+1);
-                doc.add(new TextField("cmath", mathTokenizer1));
-                result.add(doc);
+                mathTokenizer1.setFormulaPosition(i + 1);
+                // doc.add(new TextField("cmath", mathTokenizer1));
+                mapping.put("cmath", mathTokenizer1);
+                result.add(mapping);
             }
         } catch (TransformerException | SAXException | ParserConfigurationException ex) {
             LOG.fatal(ex);
         }
         return result;
     }
-    
 }

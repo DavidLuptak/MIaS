@@ -8,12 +8,8 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import org.apache.lucene.document.DateTools;
-import org.apache.lucene.document.Document;
-import org.apache.lucene.document.Field;
-import org.apache.lucene.document.LongField;
-import org.apache.lucene.document.StringField;
-import org.apache.lucene.document.TextField;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * File implementation of the DocumentSource.
@@ -50,23 +46,43 @@ public class FileDocument implements DocumentSource {
      * </ul>
      * @return New Lucene document.
      */
+//    @Override
+//    public Document createDocument() {
+//        Document doc = new Document();
+//
+//        doc.add(new StringField("path", path, Field.Store.YES));
+//
+//        doc.add(new StringField("id", path, Field.Store.YES));
+//
+//        doc.add(new StringField("modified",
+//                DateTools.timeToString(file.lastModified(), DateTools.Resolution.MINUTE),
+//                Field.Store.YES));
+//
+//        doc.add(new LongField("filesize", file.length(), Field.Store.YES));
+//
+//        doc.add(new TextField("title", file.getName(), Field.Store.YES));
+//        return doc;
+//    }
+
+    /**
+     * Creates Elasticsearch IndexRequest mapping with the fields same as above.
+     *
+     * @return New Elasticsearch IndexRequest mapping
+     */
     @Override
-    public Document createDocument() {
-        Document doc = new Document();
+    public Map<String, Object> createMapping() {
 
-        doc.add(new StringField("path", path, Field.Store.YES));
-        
-        doc.add(new StringField("id", path, Field.Store.YES));
+        Map<String, Object> mapping = new HashMap<>();
 
-        doc.add(new StringField("modified",
-                DateTools.timeToString(file.lastModified(), DateTools.Resolution.MINUTE),
-                Field.Store.YES));
+        mapping.put("path", path);
+        mapping.put("id", path);
+        mapping.put("modified", file.lastModified()); // unix time is probably ok for now
+        mapping.put("filesize", file.length());
+        mapping.put("title", file.getName());
 
-        doc.add(new LongField("filesize", file.length(), Field.Store.YES));
-        
-        doc.add(new TextField("title", file.getName(), Field.Store.YES));
-        return doc;
+        return mapping;
     }
+
 
     @Override
     public String getDocumentSourcePath() {

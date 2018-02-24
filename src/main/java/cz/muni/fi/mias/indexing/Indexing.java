@@ -1,11 +1,31 @@
 package cz.muni.fi.mias.indexing;
 
-import cz.muni.fi.mias.PayloadSimilarity;
 import cz.muni.fi.mias.Settings;
 import cz.muni.fi.mias.indexing.doc.FileExtDocumentHandler;
 import cz.muni.fi.mias.indexing.doc.FolderVisitor;
 import cz.muni.fi.mias.indexing.doc.RecursiveFileVisitor;
 import cz.muni.fi.mias.math.MathTokenizer;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.apache.lucene.analysis.Analyzer;
+import org.apache.lucene.analysis.standard.StandardAnalyzer;
+import org.apache.lucene.document.Document;
+import org.apache.lucene.index.*;
+import org.apache.lucene.store.FSDirectory;
+import org.elasticsearch.ElasticsearchException;
+import org.elasticsearch.action.ActionListener;
+import org.elasticsearch.action.DocWriteResponse;
+import org.elasticsearch.action.admin.indices.create.CreateIndexRequest;
+import org.elasticsearch.action.admin.indices.create.CreateIndexResponse;
+import org.elasticsearch.action.admin.indices.delete.DeleteIndexRequest;
+import org.elasticsearch.action.bulk.BulkRequest;
+import org.elasticsearch.action.bulk.BulkResponse;
+import org.elasticsearch.action.index.IndexRequest;
+import org.elasticsearch.action.index.IndexResponse;
+import org.elasticsearch.client.RestHighLevelClient;
+import org.elasticsearch.common.xcontent.XContentType;
+import org.elasticsearch.rest.RestStatus;
+
 import java.io.File;
 import java.io.IOException;
 import java.lang.management.ManagementFactory;
@@ -15,19 +35,8 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.*;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-import org.apache.lucene.analysis.Analyzer;
-import org.apache.lucene.analysis.standard.StandardAnalyzer;
-import org.apache.lucene.document.Document;
-import org.apache.lucene.index.DirectoryReader;
-import org.apache.lucene.index.IndexWriter;
-import org.apache.lucene.index.IndexWriterConfig;
-import org.apache.lucene.index.KeepOnlyLastCommitDeletionPolicy;
-import org.apache.lucene.index.Term;
-import org.apache.lucene.store.FSDirectory;
-import org.apache.lucene.util.Version;
 
 /**
  * Indexing class responsible for adding, updating and deleting files from index,
@@ -39,7 +48,7 @@ import org.apache.lucene.util.Version;
 public class Indexing {
 
     private static final Logger LOG = LogManager.getLogger(Indexing.class);
-    
+
     private File indexDir;
     private Analyzer analyzer = new StandardAnalyzer();
     private long docLimit = Settings.getDocLimit();
@@ -49,12 +58,74 @@ public class Indexing {
     private String storage;
     private long startTime;
 
+    private RestHighLevelClient client;
+    private String indexName;
+    private String type;
+
     /**
      * Constructor creates Indexing instance. Directory with the index is taken from the Settings.
      *
      */
-    public Indexing() {
+    public Indexing(RestHighLevelClient client) {
         this.indexDir = new File(Settings.getIndexDir());
+        this.client = client;
+        this.indexName = "mias-index";
+        this.type = "mias-math-document";
+    }
+
+    // ES index
+    public void createIndex() {
+        // for testing
+        deleteIndex();
+
+        CreateIndexRequest request = new CreateIndexRequest(indexName);
+
+        // define analyzer / tokenizer and mapping for 'pmath'
+        request.source(
+                "{\n" +
+                    "\"settings\":{\n" +
+                        "\"analysis\":{\n" +
+                            "\"analyzer\":{\n" +
+                                "\"miasmath-analyzer\":{\n" +
+                                    "\"type\":\"custom\",\n" +
+                                    "\"tokenizer\": \"miasmath-tokenizer\"\n" +
+                                "}\n" +
+                            "}\n" +
+                        "}\n" +
+                    "},\n" +
+                    "\"mappings\": {\n" +
+                        "\"mias-math-document\": {\n" +
+                            "\"properties\": {\n" +
+                                "\"pmath\": {\n" +
+                                    "\"type\": \"text\",\n" +
+                                    "\"analyzer\": \"miasmath-analyzer\",\n" +
+                                    "\"search_analyzer\": \"miasmath-analyzer\"\n" +
+                                "}\n" +
+                            "}\n" +
+                        "}\n" +
+                    "}\n" +
+                        "}",
+                XContentType.JSON);
+        try {
+            CreateIndexResponse createIndexResponse = client.indices().create(request);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    // ES index
+    private void deleteIndex() {
+        try {
+            DeleteIndexRequest request = new DeleteIndexRequest(indexName);
+            client.indices().delete(request);
+            LOG.info("Index '{}' successfully deleted", indexName);
+        } catch (ElasticsearchException exception) {
+            if (exception.status() == RestStatus.NOT_FOUND) {
+                LOG.warn("Index '{}' not found to delete", indexName);
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
     }
 
     /**
@@ -70,24 +141,25 @@ public class Indexing {
         }
         final File docDir = new File(path);
         if (!docDir.exists() || !docDir.canRead()) {
-            LOG.fatal("Document directory '{}' does not exist or is not readable, please check the path.",docDir.getAbsoluteFile());            
+            LOG.fatal("Document directory '{}' does not exist or is not readable, please check the path.",docDir.getAbsoluteFile());
             System.exit(1);
         }
         try {
             startTime = System.currentTimeMillis();
-            IndexWriterConfig config = new IndexWriterConfig(Version.LUCENE_45, analyzer);
-            PayloadSimilarity ps = new PayloadSimilarity();
-            ps.setDiscountOverlaps(false);
-            config.setSimilarity(ps);
-            config.setIndexDeletionPolicy(new KeepOnlyLastCommitDeletionPolicy());
-            try (IndexWriter writer = new IndexWriter(FSDirectory.open(indexDir), config))
-            {
-                LOG.info("Getting list of documents to index.");
-                List<File> files = getDocs(docDir);
-                countFiles(files);
-                LOG.info("Number of documents to index is {}",count);
-                indexDocsThreaded(files, writer);
-            }
+            // Lucene leftover:
+            // IndexWriterConfig config = new IndexWriterConfig(analyzer);
+            // PayloadSimilarity ps = new PayloadSimilarity();
+            // ps.setDiscountOverlaps(false);
+            // config.setSimilarity(ps);
+            // config.setIndexDeletionPolicy(new KeepOnlyLastCommitDeletionPolicy());
+            // try (IndexWriter writer = new IndexWriter(FSDirectory.open(indexDir.toPath()), config))
+            // {
+            LOG.info("Getting list of documents to index.");
+            List<File> files = getDocs(docDir);
+            countFiles(files);
+            LOG.info("Number of documents to index is {}",count);
+            indexDocsThreaded(files);
+            // }
         } catch (IOException ex) {
             LOG.error(ex);
         }
@@ -113,7 +185,118 @@ public class Indexing {
         }
     }
 
-    private void indexDocsThreaded(List<File> files, IndexWriter writer) {
+    // ES indexing
+    private void indexDocsSync(List<Map<String, Object>> mappings) throws IOException {
+        for (Map<String, Object> map : mappings) {
+            IndexRequest indexRequest = new IndexRequest(indexName, type);
+            indexRequest.source(map);
+
+            LOG.info("adding to index {} docId={}",
+                    indexRequest.sourceAsMap().get("path"),
+                    indexRequest.sourceAsMap().get("id"));
+
+            // sync call
+            try {
+                IndexResponse indexResponse = client.index(indexRequest);
+                if ((indexResponse.getResult() == DocWriteResponse.Result.CREATED) ||
+                    (indexResponse.getResult() == DocWriteResponse.Result.UPDATED)) {
+                    LOG.info("Doc '{}' indexed", indexResponse.toString());
+                    LOG.info("Documents indexed: {}", ++progress);
+                }
+            } catch (ElasticsearchException e) {
+                if (e.status() == RestStatus.CONFLICT) {
+                    LOG.error("Elasticsearch exception while indexing");
+                    LOG.error(e.getDetailedMessage(), e);
+                }
+            }
+        }
+    }
+
+    // ES indexing
+    private void indexDocsAsync(List<Map<String, Object>> mappings) {
+
+        for (Map<String, Object> map : mappings) {
+            IndexRequest indexRequest = new IndexRequest(indexName, type);
+            indexRequest.source(map);
+
+            LOG.info("adding to index {} docId={}",
+                    indexRequest.sourceAsMap().get("path"),
+                    indexRequest.sourceAsMap().get("id"));
+
+            // async call
+            client.indexAsync(indexRequest, new ActionListener<IndexResponse>() {
+                @Override
+                public void onResponse(IndexResponse indexResponse) {
+                    LOG.info("Successfully indexed.");
+                    LOG.info("Documents indexed: {}", ++progress);
+                }
+
+                @Override
+                public void onFailure(Exception e) {
+                    LOG.fatal("Indexing failed");
+                    LOG.fatal("Document '{}' indexing failed: {}",
+                            indexRequest.sourceAsMap().get("path"),
+                            e.getMessage());
+                    // get also stack trace
+                    LOG.error(e.getMessage(), e);
+                }
+            });
+        }
+    }
+
+    // ES indexing
+    private void indexDocsBulk(List<Map<String, Object>> mappings) throws IOException {
+        BulkRequest bulkRequest = new BulkRequest();
+
+        for (Map<String, Object> map : mappings) {
+            IndexRequest indexRequest = new IndexRequest(indexName, type);
+            indexRequest.source(map);
+
+            bulkRequest.add(indexRequest);
+
+            LOG.info("adding to index {} docId={}",
+                    indexRequest.sourceAsMap().get("path"),
+                    indexRequest.sourceAsMap().get("id"));
+
+        }
+
+        // sync call
+        BulkResponse bulkResponse = client.bulk(bulkRequest);
+
+        // async call
+//        client.bulkAsync(bulkRequest, new ActionListener<BulkResponse>() {
+//            @Override
+//            public void onResponse(BulkResponse bulkItemResponses) {
+//                LOG.info("Successfully indexed.");
+//                LOG.info("Documents indexed: {}", ++progress);
+//            }
+//
+//            @Override
+//            public void onFailure(Exception e) {
+//                LOG.fatal("Indexing failed");
+//                LOG.error(e.getMessage(), e);
+//            }
+//        });
+    }
+
+    // ES indexing
+    private void indexDocsNonThreaded(List<File> files) {
+
+        try {
+            for (File file : files) {
+                FileExtDocumentHandler fileExtDocumentHandler = new FileExtDocumentHandler(file, resolvePath(file));
+                List<Map<String, Object>> mappings = fileExtDocumentHandler.getMappings(file, resolvePath(file));
+
+                indexDocsSync(mappings);
+                //indexDocsAsync(mappings);
+                //indexDocsBulk(mappings);
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void indexDocsThreaded(List<File> files) {
         try {
             Iterator<File> it = files.iterator();
             ExecutorService executor = Executors.newFixedThreadPool(Settings.getNumThreads());
@@ -131,25 +314,10 @@ public class Indexing {
                         executor.execute(ft);
                         running++;
                     } else if (tasks[i] != null && tasks[i].isDone()) {
-                        List<Document> docs = (List<Document>) tasks[i].get();
+                        List<Map<String, Object>> mappings = (List<Map<String, Object>>) tasks[i].get();
                         running--;
                         tasks[i] = null;
-                        for (Document doc : docs) {
-                            if (doc != null) {
-                                if (progress % 10000 == 0) {
-                                    printTimes();
-                                    writer.commit();
-                                }
-                                try {
-                                    LOG.info("adding to index {} docId={}",doc.get("path"),doc.get("id"));
-                                    writer.updateDocument(new Term("id", doc.get("id")), doc);
-                                    LOG.info("Documents indexed: {}", ++progress);
-                                } catch (Exception ex) {
-                                    LOG.fatal("Document '{}' indexing failed: {}",doc.get("path"),ex.getMessage());
-                                    LOG.fatal(ex.getStackTrace());
-                                }
-                            }
-                        }
+                        indexDocsSync(mappings);
                         LOG.info("File progress: {} of {} done...",++fileProgress, count);
                     }
                 }
@@ -165,12 +333,12 @@ public class Indexing {
      * Optimizes the index.
      */
     public void optimize() {        
-        IndexWriterConfig config = new IndexWriterConfig(Version.LUCENE_31, analyzer);
-        config.setIndexDeletionPolicy(new KeepOnlyLastCommitDeletionPolicy());  
+        IndexWriterConfig config = new IndexWriterConfig(analyzer);
+        config.setIndexDeletionPolicy(new KeepOnlyLastCommitDeletionPolicy());
         // TODO what do we measure here ? time of optimization or optimiziation
         // and index opening aswell
         startTime = System.currentTimeMillis();
-        try(IndexWriter writer = new IndexWriter(FSDirectory.open(indexDir), config)){
+        try(IndexWriter writer = new IndexWriter(FSDirectory.open(indexDir.toPath()), config)){
 //            writer.optimize();    
             LOG.info("Optimizing time: {} ms",System.currentTimeMillis()-startTime);
         } catch (IOException e) {
@@ -214,9 +382,9 @@ public class Indexing {
             LOG.error("Document directory '{}' does not exist or is not readable, please check the path.", docDir.getAbsolutePath());
             System.exit(1);
         }
-        IndexWriterConfig config = new IndexWriterConfig(Version.LUCENE_31, analyzer);
+        IndexWriterConfig config = new IndexWriterConfig(analyzer);
         config.setIndexDeletionPolicy(new KeepOnlyLastCommitDeletionPolicy());
-        try(IndexWriter writer = new IndexWriter(FSDirectory.open(indexDir), config)) { 
+        try(IndexWriter writer = new IndexWriter(FSDirectory.open(indexDir.toPath()), config)) {
             deleteDocs(writer, docDir);
         } catch (IOException ex) {
             System.out.println(ex.getMessage());
@@ -245,7 +413,7 @@ public class Indexing {
      */
     public void getStats() {
         String stats = "\nIndex statistics: \n\n";
-        try(DirectoryReader dr = DirectoryReader.open(FSDirectory.open(indexDir))) {
+        try(DirectoryReader dr = DirectoryReader.open(FSDirectory.open(indexDir.toPath()))) {
             stats += "Index directory: "+indexDir.getAbsolutePath() + "\n";
             stats += "Number of indexed documents: " + dr.numDocs() + "\n";
             
@@ -271,7 +439,7 @@ public class Indexing {
         } 
     }
 
-    
+
 
     private String resolvePath(File file) throws IOException {
         String path = file.getCanonicalPath();
@@ -289,7 +457,7 @@ public class Indexing {
         }
         return result;
     }
-    
+
     private long getUserTime() {
         ThreadMXBean bean = ManagementFactory.getThreadMXBean();
         long result = 0;
